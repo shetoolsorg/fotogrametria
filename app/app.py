@@ -81,42 +81,8 @@ async def calculate_stats(
                 if row.get("status") != "ok":
                     continue
 
-                doc_filter = {
+                doc = {
                     "date": parsed_date,
-                    "metadata.crop": crop,
-                    "metadata.farm": farm,
-                    "metadata.plot": str(row["plot_id"]),
-                    "metadata.metric": index_type.lower(),
-                }
-
-                doc_update = {
-                    "$set": {
-                        "date": parsed_date,
-                        "metadata": {
-                            "crop": crop,
-                            "farm": farm,
-                            "plot": str(row["plot_id"]),
-                            "metric": index_type.lower(),
-                        },
-                        "avg": row["mean"],
-                        "max": row["max"],
-                        "min": row["min"],
-                    }
-                }
-
-                result = get_database().metric.update_one(
-                    doc_filter,
-                    doc_update,
-                    upsert=True
-                )
-
-                if result.upserted_id is not None:
-                    upserted_count += 1
-                else:
-                    matched_count += 1
-
-                processed_docs.append({
-                    "date": parsed_date.isoformat(),
                     "metadata": {
                         "crop": crop,
                         "farm": farm,
@@ -126,15 +92,40 @@ async def calculate_stats(
                     "avg": row["mean"],
                     "max": row["max"],
                     "min": row["min"],
+                }
+
+                existing = collection.find_one({
+                    "date": parsed_date,
+                    "metadata.crop": crop,
+                    "metadata.farm": farm,
+                    "metadata.plot": str(row["plot_id"]),
+                    "metadata.metric": index_type.lower(),
+                })
+
+                if existing:
+                    skipped_count += 1
+                    skipped_docs.append({
+                        "plot": str(row["plot_id"]),
+                        "reason": "document already exists for same date/crop/farm/plot/metric"
+                    })
+                    continue
+
+                collection.insert_one(doc)
+                inserted_count += 1
+                inserted_docs.append({
+                    "plot": str(row["plot_id"]),
+                    "avg": row["mean"],
+                    "max": row["max"],
+                    "min": row["min"],
                 })
 
             return {
                 "message": "Statistics processed successfully.",
                 "flight_id": flight_id,
-                "processed_count": len(processed_docs),
-                "upserted_count": upserted_count,
-                "updated_count": matched_count,
-                "documents": processed_docs,
+                "inserted_count": inserted_count,
+                "skipped_count": skipped_count,
+                "inserted_docs": inserted_docs,
+                "skipped_docs": skipped_docs,
             }
 
         except Exception as e:
