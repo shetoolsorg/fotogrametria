@@ -94,7 +94,7 @@ async def calculate_stats(
                     "min": row["min"],
                 }
 
-                existing = collection.find_one({
+                existing = get_database.metric.find_one({
                     "date": parsed_date,
                     "metadata.crop": crop,
                     "metadata.farm": farm,
@@ -110,7 +110,7 @@ async def calculate_stats(
                     })
                     continue
 
-                collection.insert_one(doc)
+                get_database.metric.insert_one(doc)
                 inserted_count += 1
                 inserted_docs.append({
                     "plot": str(row["plot_id"]),
