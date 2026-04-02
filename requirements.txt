@@ -1,0 +1,13 @@
+geopandas 
+rasterio 
+shapely 
+numpy
+fastapi
+python-multipart
+uvicorn
+pymongo
+pydantic
+pydantic[email]
+python-dotenv
+jinja2
+requests
