@@ -1,0 +1,17 @@
+# Compiled Python files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments
+venv/
+env/
+.venv/
+.env/
+
+# Distribution / Build
+dist/
+build/
+*.egg-info/
+
+.env
