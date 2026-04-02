@@ -73,9 +73,10 @@ async def calculate_stats(
                 include_no_coverage=False
             )
 
-            upserted_count = 0
-            matched_count = 0
-            processed_docs = []
+            inserted_count = 0
+            skipped_count = 0
+            inserted_docs = []
+            skipped_docs = []
 
             for row in results:
                 if row.get("status") != "ok":
