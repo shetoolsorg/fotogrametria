@@ -1,41 +1,79 @@
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import geopandas as gpd
+import numpy as np
 import rasterio
 from rasterio.features import geometry_mask
 from shapely.geometry import box
-import numpy as np
+
+
+def make_json_safe(value: Any) -> Any:
+    if value is None:
+        return None
+
+    if isinstance(value, (str, int, float, bool, datetime)):
+        return value
+
+    if isinstance(value, np.integer):
+        return int(value)
+
+    if isinstance(value, np.floating):
+        return float(value)
+
+    if isinstance(value, np.bool_):
+        return bool(value)
+
+    try:
+        if np.isnan(value):
+            return None
+    except Exception:
+        pass
+
+    if hasattr(value, "__geo_interface__"):
+        return value.__geo_interface__
+
+    return str(value)
 
 
 def calculate_polygon_stats(
     raster_path: str | Path,
     polygons_path: str | Path,
-    plot_id_field: str = "lote_id",
-    flight_id: Optional[str] = None,
-    index_type: str = "NDVI",
+    date: datetime,
+    base_metadata: Dict[str, Any],
+    plot_id_field: str = "uid",
     include_no_coverage: bool = True,
+    layer_name: Optional[str] = None,
+    extra_metrics: bool = True,
 ) -> List[Dict[str, Any]]:
     """
-    Calcula estadísticas zonales simples por polígono sobre un raster.
+    Regresa documentos con estructura tipo MongoDB time series:
 
-    Parámetros:
-        raster_path: ruta al raster .tif
-        polygons_path: ruta al archivo vectorial (gpkg, geojson, shp, etc.)
-        plot_id_field: nombre del campo identificador del polígono
-        flight_id: identificador del vuelo
-        index_type: tipo de índice, por ejemplo NDVI
-        include_no_coverage: si True, agrega registros para polígonos sin cobertura
-
-    Regresa:
-        Lista de dicts, un registro por polígono.
+    {
+        "date": datetime,
+        "metadata": { ... },
+        "avg": 0.5,
+        "max": 0.7,
+        "min": 0.4,
+        ...
+    }
     """
     raster_path = Path(raster_path)
     polygons_path = Path(polygons_path)
 
-    results: List[Dict[str, Any]] = []
+    if not raster_path.exists():
+        raise FileNotFoundError(f"Raster file not found: {raster_path}")
+
+    if not polygons_path.exists():
+        raise FileNotFoundError(f"Polygon file not found: {polygons_path}")
+
+    if not isinstance(base_metadata, dict):
+        raise ValueError("base_metadata must be a dict")
+
+    documents: List[Dict[str, Any]] = []
 
     with rasterio.open(raster_path) as src:
         raster_crs = src.crs
@@ -43,121 +81,148 @@ def calculate_polygon_stats(
         raster_transform = src.transform
         raster_nodata = src.nodata
 
-        # Leer primera banda
+        if raster_crs is None:
+            raise ValueError(f"The raster has no CRS defined: {raster_path}")
+
         raster_data = src.read(1)
 
-        # Máscara global de nodata
         if raster_nodata is not None:
             nodata_mask = raster_data == raster_nodata
         else:
             nodata_mask = np.zeros(raster_data.shape, dtype=bool)
 
-        # Leer polígonos
-        gdf = gpd.read_file(polygons_path)
+        if polygons_path.suffix.lower() == ".gpkg":
+            available_layers = gpd.list_layers(str(polygons_path))
+            if available_layers.empty:
+                raise ValueError(f"The GPKG file has no layers: {polygons_path}")
+
+            if layer_name is None:
+                layer_name = available_layers.iloc[0]["name"]
+
+            gdf = gpd.read_file(str(polygons_path), layer=layer_name)
+        else:
+            gdf = gpd.read_file(str(polygons_path))
+
+        if gdf.empty:
+            raise ValueError(f"The polygon layer/file is empty: {polygons_path}")
+
+        if gdf.crs is None:
+            raise ValueError(f"The polygon file has no CRS defined: {polygons_path}")
 
         if plot_id_field not in gdf.columns:
-            raise ValueError(f"El campo '{plot_id_field}' no existe en el archivo de polígonos.")
+            raise ValueError(
+                f"The field '{plot_id_field}' does not exist in the polygon file. "
+                f"Available fields: {list(gdf.columns)}"
+            )
 
-        # Reproyectar al CRS del raster si hace falta
-        if gdf.crs != raster_crs:
-            gdf = gdf.to_crs(raster_crs)
-
-        # Filtrar geometrías válidas
         gdf = gdf[gdf.geometry.notnull()].copy()
         gdf = gdf[gdf.is_valid].copy()
 
-        # Crear bbox del raster como polígono
-        raster_bbox_geom = box(*raster_bounds)
+        if gdf.empty:
+            raise ValueError("No valid geometries were found in the polygon file.")
 
-        # Detectar intersección con el raster
+        if gdf.crs != raster_crs:
+            gdf = gdf.to_crs(raster_crs)
+
+        raster_bbox_geom = box(*raster_bounds)
         gdf["intersects_raster"] = gdf.geometry.intersects(raster_bbox_geom)
 
         intersecting = gdf[gdf["intersects_raster"]].copy()
         non_intersecting = gdf[~gdf["intersects_raster"]].copy()
 
-        # Procesar solo los que intersectan
         for _, row in intersecting.iterrows():
-            plot_id = row[plot_id_field]
+            plot_id = str(row[plot_id_field])
             geom = row.geometry
 
-            record: Dict[str, Any] = {
-                "flight_id": flight_id,
-                "raster_path": str(raster_path),
-                "index_type": index_type,
-                "plot_id": plot_id,
-                "status": None,
-                "mean": None,
-                "min": None,
-                "max": None,
-                "stddev": None,
-                "count": None,
-            }
+            metadata = dict(base_metadata)
+            for col in gdf.columns:
+                if col == "intersects_raster":
+                    continue
+                metadata[col] = make_json_safe(row[col])
 
             try:
-                # Máscara del polígono sobre el raster
                 mask = geometry_mask(
                     [geom],
                     transform=raster_transform,
-                    invert=True,   # True dentro del polígono
+                    invert=True,
                     out_shape=raster_data.shape,
                 )
 
-                # Combinar máscara del polígono con nodata
                 valid_mask = mask & (~nodata_mask)
                 values = raster_data[valid_mask]
-
-                # Quitar NaN si existen
                 values = values[~np.isnan(values)]
 
                 if values.size == 0:
-                    record["status"] = "empty_intersection"
-                else:
-                    record["status"] = "ok"
-                    record["mean"] = float(np.mean(values))
-                    record["min"] = float(np.min(values))
-                    record["max"] = float(np.max(values))
-                    record["stddev"] = float(np.std(values))
-                    record["count"] = int(values.size)
+                    if include_no_coverage:
+                        documents.append({
+                            "date": date,
+                            "metadata": metadata,
+                            "avg": None,
+                            "max": None,
+                            "min": None,
+                            "stddev": None,
+                            "count": 0,
+                            "p10": None,
+                            "p50": None,
+                            "p90": None,
+                            "status": "empty_intersection",
+                        })
+                    continue
+
+                doc: Dict[str, Any] = {
+                    "date": date,
+                    "metadata": metadata,
+                    "avg": float(np.mean(values)),
+                    "max": float(np.max(values)),
+                    "min": float(np.min(values)),
+                }
+
+                if extra_metrics:
+                    doc["stddev"] = float(np.std(values))
+                    doc["count"] = int(values.size)
+                    doc["p10"] = float(np.percentile(values, 10))
+                    doc["p50"] = float(np.percentile(values, 50))
+                    doc["p90"] = float(np.percentile(values, 90))
+
+                documents.append(doc)
 
             except Exception as e:
-                record["status"] = "error"
-                record["error_message"] = str(e)
+                if include_no_coverage:
+                    documents.append({
+                        "date": date,
+                        "metadata": metadata,
+                        "avg": None,
+                        "max": None,
+                        "min": None,
+                        "stddev": None,
+                        "count": 0,
+                        "p10": None,
+                        "p50": None,
+                        "p90": None,
+                        "status": "error",
+                        "error_message": str(e),
+                    })
 
-            results.append(record)
-
-        # Agregar polígonos sin cobertura si así lo quieres
         if include_no_coverage:
             for _, row in non_intersecting.iterrows():
-                results.append(
-                    {
-                        "flight_id": flight_id,
-                        "raster_path": str(raster_path),
-                        "index_type": index_type,
-                        "plot_id": row[plot_id_field],
-                        "status": "no_coverage",
-                        "mean": None,
-                        "min": None,
-                        "max": None,
-                        "stddev": None,
-                        "count": None,
-                    }
-                )
+                metadata = dict(base_metadata)
+                for col in gdf.columns:
+                    if col == "intersects_raster":
+                        continue
+                    metadata[col] = make_json_safe(row[col])
 
-    return results
+                documents.append({
+                    "date": date,
+                    "metadata": metadata,
+                    "avg": None,
+                    "max": None,
+                    "min": None,
+                    "stddev": None,
+                    "count": 0,
+                    "p10": None,
+                    "p50": None,
+                    "p90": None,
+                    "status": "no_coverage",
+                })
 
-
-if __name__ == "__main__":
-    raster = "2026-01-28.tif"
-    polygons = "lotes.gpkg"
-
-    records = calculate_polygon_stats(
-        raster_path=raster,
-        polygons_path=polygons,
-        plot_id_field="lote_id",
-        flight_id="vuelo_2026_04_01",
-        index_type="NDVI",
-        include_no_coverage=True,
-    )
-
-    for r in records:
-        print(r)
+    return documents

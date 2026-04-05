@@ -10,6 +10,7 @@ from typing import List, Dict, Any
 from pymongo import MongoClient
 from pymongo.errors import ConnectionFailure
 from dotenv import load_dotenv
+import geopandas as gpd
 
 # Load environment variables from .env file
 load_dotenv()
@@ -28,28 +29,41 @@ def get_database():
 
 app = FastAPI(title="Polygon Stats API", version="1.0.0")
 
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy"}
+def parse_tif_filename(filename: str) -> dict:
+    # EP_V1_291025_NDVI.tif
+    stem = Path(filename).stem
+    parts = stem.rsplit("_", 3)
+
+    if len(parts) != 4:
+        raise ValueError(
+            "Invalid tif filename format. Expected EP_V1_291025_NDVI.tif"
+        )
+
+    local_id, flight_code, raw_date, metric = parts
+    parsed_date = datetime.strptime(raw_date, "%d%m%y").replace(tzinfo=timezone.utc)
+
+    return {
+        "local_id": local_id,
+        "flight_code": flight_code,
+        "date": parsed_date,
+        "metric": metric.lower(),
+    }
 
 @app.post("/calculate_stats", dependencies=[Depends(verify_token)])
 async def calculate_stats(
     tif_file: UploadFile = File(...),
-    date: str = Form(...),
-    index_type: str = Form(...),
-    crop: str = Form(""),
-    farm: str = Form(""),
-    gpkg_file: UploadFile = File(...)
+    gpkg_file: UploadFile = File(...),
+    plot_id_field: str = Form("uid"),
 ):
     try:
-        parsed_date = datetime.fromisoformat(date)
-        if parsed_date.tzinfo is None:
-            parsed_date = parsed_date.replace(tzinfo=timezone.utc)
-    except ValueError:
-        raise HTTPException(
-            status_code=400,
-            detail="Invalid date format. Use ISO format like 2026-01-01 or 2026-01-01T00:00:00"
-        )
+        tif_info = parse_tif_filename(tif_file.filename)
+        parsed_date = tif_info["date"]
+        metric = tif_info["metric"]
+        local_id = tif_info["local_id"]
+        flight_code = tif_info["flight_code"]
+        flight_id = f"{local_id}_{flight_code}_{parsed_date.strftime('%Y-%m-%d')}"
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
     with tempfile.TemporaryDirectory() as temp_dir:
         tif_path = Path(temp_dir) / tif_file.filename
@@ -61,72 +75,63 @@ async def calculate_stats(
         with open(gpkg_path, "wb") as f:
             f.write(await gpkg_file.read())
 
-        flight_id = f"{Path(tif_file.filename).stem}_{parsed_date.date().isoformat()}"
-
         try:
-            results = raster_stats.calculate_polygon_stats(
+            layers = gpd.list_layers(str(gpkg_path))
+            if layers.empty:
+                raise ValueError("The GPKG file does not contain any layers.")
+
+            layer_name = layers.iloc[0]["name"]
+
+            base_metadata = {
+                "local_id": local_id,
+                "flight_code": flight_code,
+                "flight_id": flight_id,
+                "metric": metric,
+                "plot_id_field": plot_id_field,
+                "source_tif": tif_file.filename,
+                "source_gpkg": gpkg_file.filename,
+                "layer_name": layer_name,
+            }
+
+            documents = raster_stats.calculate_polygon_stats(
                 raster_path=str(tif_path),
                 polygons_path=str(gpkg_path),
-                plot_id_field="lote_id",
-                flight_id=flight_id,
-                index_type=index_type,
-                include_no_coverage=False
+                date=parsed_date,
+                base_metadata=base_metadata,
+                plot_id_field=plot_id_field,
+                include_no_coverage=False,
+                layer_name=layer_name,
+                extra_metrics=True,
             )
 
             inserted_count = 0
             skipped_count = 0
-            inserted_docs = []
-            skipped_docs = []
 
-            for row in results:
-                if row.get("status") != "ok":
-                    continue
-
-                doc = {
-                    "date": parsed_date,
-                    "metadata": {
-                        "crop": crop,
-                        "farm": farm,
-                        "plot": str(row["plot_id"]),
-                        "metric": index_type.lower(),
-                    },
-                    "avg": row["mean"],
-                    "max": row["max"],
-                    "min": row["min"],
-                }
+            for doc in documents:
+                plot_value = str(doc["metadata"].get(plot_id_field))
 
                 existing = get_database().metric.find_one({
-                    "date": parsed_date,
-                    "metadata.crop": crop,
-                    "metadata.farm": farm,
-                    "metadata.plot": str(row["plot_id"]),
-                    "metadata.metric": index_type.lower(),
+                    "date": doc["date"],
+                    f"metadata.{plot_id_field}": plot_value,
+                    "metadata.metric": doc["metadata"]["metric"],
+                    "metadata.flight_code": doc["metadata"]["flight_code"],
+                    "metadata.local_id": doc["metadata"]["local_id"],
                 })
 
                 if existing:
                     skipped_count += 1
-                    skipped_docs.append({
-                        "plot": str(row["plot_id"]),
-                        "reason": "document already exists for same date/crop/farm/plot/metric"
-                    })
                     continue
 
                 get_database().metric.insert_one(doc)
                 inserted_count += 1
-                inserted_docs.append({
-                    "plot": str(row["plot_id"]),
-                    "avg": row["mean"],
-                    "max": row["max"],
-                    "min": row["min"],
-                })
 
             return {
                 "message": "Statistics processed successfully.",
                 "flight_id": flight_id,
+                "plot_id_field": plot_id_field,
+                "generated_count": len(documents),
                 "inserted_count": inserted_count,
                 "skipped_count": skipped_count,
-                "inserted_docs": inserted_docs,
-                "skipped_docs": skipped_docs,
             }
 
         except Exception as e:
