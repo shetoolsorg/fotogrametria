@@ -15,5 +15,5 @@ build/
 *.egg-info/
 
 .env
-
+cogs/
 scripts/metabase_data/

@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 from datetime import datetime, timezone
 import os
+import shutil
 from app import raster_stats
 from typing import List, Dict, Any
 from pymongo import MongoClient
@@ -54,6 +55,7 @@ async def calculate_stats(
     tif_file: UploadFile = File(...),
     gpkg_file: UploadFile = File(...),
     plot_id_field: str = Form("uid"),
+    force_store: bool = Form(False),
 ):
     try:
         tif_info = parse_tif_filename(tif_file.filename)
@@ -104,6 +106,17 @@ async def calculate_stats(
                 extra_metrics=True,
             )
 
+            # Store tif in cogs path if we have data
+            tif_stored = False
+            if len(documents) > 0:
+                cogs_path = os.getenv("COGS_PATH", "./cogs")
+                cogs_dir = Path(cogs_path)
+                cogs_dir.mkdir(parents=True, exist_ok=True)
+                target = cogs_dir / tif_file.filename
+                if not target.exists() or force_store:
+                    shutil.copy(tif_path, target)
+                    tif_stored = True
+
             inserted_count = 0
             skipped_count = 0
 
@@ -132,6 +145,7 @@ async def calculate_stats(
                 "generated_count": len(documents),
                 "inserted_count": inserted_count,
                 "skipped_count": skipped_count,
+                "tif_stored": tif_stored,
             }
 
         except Exception as e:
