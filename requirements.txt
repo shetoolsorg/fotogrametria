@@ -5,7 +5,7 @@ numpy
 fastapi
 python-multipart
 uvicorn
-pymongo
+motor
 pydantic
 pydantic[email]
 python-dotenv

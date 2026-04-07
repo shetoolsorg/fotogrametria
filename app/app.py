@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Query
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pathlib import Path
@@ -7,15 +7,52 @@ from datetime import datetime, timezone
 import os
 import shutil
 from app import raster_stats
-from typing import List, Dict, Any
-from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure
+from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
 import geopandas as gpd
-
+from pyproj import Transformer
+from motor.motor_asyncio import AsyncIOMotorClient
 # Load environment variables from .env file
 load_dotenv()
 security = HTTPBearer()
+
+# Likely UTM Zone 13N for your data. Change if needed.
+SOURCE_CRS = "EPSG:32613"
+TARGET_CRS = "EPSG:4326"
+
+transformer = Transformer.from_crs(SOURCE_CRS, TARGET_CRS, always_xy=True)
+
+def transform_ring(ring: List[List[float]]) -> List[List[float]]:
+    transformed = []
+    for x, y in ring:
+        lon, lat = transformer.transform(x, y)
+        transformed.append([lon, lat])
+    return transformed
+
+def transform_polygon(polygon_coords: List[List[List[float]]]) -> List[List[List[float]]]:
+    # polygon_coords = [outer_ring, hole1, hole2, ...]
+    return [transform_ring(ring) for ring in polygon_coords]
+
+def transform_geometry_to_wgs84(geometry: Dict[str, Any]) -> Dict[str, Any]:
+    geom_type = geometry.get("type")
+    coords = geometry.get("coordinates")
+
+    if not geom_type or coords is None:
+        raise ValueError("Invalid geometry")
+
+    if geom_type == "Polygon":
+        return {
+            "type": "Polygon",
+            "coordinates": transform_polygon(coords),
+        }
+
+    if geom_type == "MultiPolygon":
+        return {
+            "type": "MultiPolygon",
+            "coordinates": [transform_polygon(polygon) for polygon in coords],
+        }
+
+    raise ValueError(f"Unsupported geometry type: {geom_type}")
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
     token = os.getenv("API_KEY", "secret-key")  # Default for development
@@ -24,8 +61,8 @@ def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
 
 def get_database():
     mongodb_url = os.getenv("MONGODB_URL", "mongodb://localhost:27017")
-    client = MongoClient(mongodb_url)
-    db = client["fotogrametria"]  # Assuming database name
+    mongo = AsyncIOMotorClient(mongodb_url)
+    db = mongo[os.getenv("MONGODB_DB", "fotogrametria")]
     return db
 
 app = FastAPI(title="Polygon Stats API", version="1.0.0")
@@ -37,7 +74,7 @@ def parse_tif_filename(filename: str) -> dict:
 
     if len(parts) != 4:
         raise ValueError(
-            "Invalid tif filename format. Expected EP_V1_291025_NDVI.tif"
+            "Invalid tif filename format. Expected UP_V#_291025_NDVI.tif"
         )
 
     local_id, flight_code, raw_date, metric = parts
@@ -48,6 +85,77 @@ def parse_tif_filename(filename: str) -> dict:
         "flight_code": flight_code,
         "date": parsed_date,
         "metric": metric.lower(),
+    }
+
+@app.get("/api/geometry")
+async def get_geometry(
+    uid: str = Query(..., description="Plot uid, e.g. UP-L23-AJO-PRE-M05-A"),
+    source_tif: Optional[str] = Query(None, description="Optional source tif filter"),
+) -> Dict[str, Any]:
+    query: Dict[str, Any] = {"metadata.uid": uid}
+
+    if source_tif:
+        query["metadata.source_tif"] = source_tif
+
+    doc = await get_database().metric.find_one(
+        query,
+        {
+            "_id": 0,
+            "metadata.uid": 1,
+            "metadata.Mudada": 1,
+            "metadata.C_Mudada": 1,
+            "metadata.up": 1,
+            "metadata.metric": 1,
+            "metadata.source_tif": 1,
+            "metadata.area_ha": 1,
+            "metadata.geometry": 1,
+            "avg": 1,
+            "min": 1,
+            "max": 1,
+            "p10": 1,
+            "p50": 1,
+            "p90": 1,
+            "stddev": 1,
+            "count": 1,
+            "date": 1,
+        },
+    )
+
+    if not doc:
+        raise HTTPException(status_code=404, detail="Geometry not found")
+
+    geometry = doc.get("metadata", {}).get("geometry")
+    if not geometry:
+        raise HTTPException(status_code=404, detail="Document has no geometry")
+
+    try:
+        geometry_wgs84 = transform_geometry_to_wgs84(geometry)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    metadata = doc.get("metadata", {})
+
+    return {
+        "type": "Feature",
+        "geometry": geometry_wgs84,
+        "properties": {
+            "uid": metadata.get("uid"),
+            "Mudada": metadata.get("Mudada"),
+            "C_Mudada": metadata.get("C_Mudada"),
+            "up": metadata.get("up"),
+            "metric": metadata.get("metric"),
+            "source_tif": metadata.get("source_tif"),
+            "area_ha": metadata.get("area_ha"),
+            "date": doc.get("date"),
+            "avg": doc.get("avg"),
+            "min": doc.get("min"),
+            "max": doc.get("max"),
+            "p10": doc.get("p10"),
+            "p50": doc.get("p50"),
+            "p90": doc.get("p90"),
+            "stddev": doc.get("stddev"),
+            "count": doc.get("count"),
+        },
     }
 
 @app.post("/calculate_stats", dependencies=[Depends(verify_token)])
