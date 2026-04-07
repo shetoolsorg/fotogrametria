@@ -1,6 +1,7 @@
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Query
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.middleware.cors import CORSMiddleware
 from pathlib import Path
 import tempfile
 from datetime import datetime, timezone
@@ -67,6 +68,19 @@ def get_database():
 
 app = FastAPI(title="Polygon Stats API", version="1.0.0")
 
+origins = [
+    "https://salaisesmap.prox.one",
+    "https://8000--main--fotogrametria--agusrumayor.coder.rumayor.org"
+    "https://maps3569.prox.one",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 def parse_tif_filename(filename: str) -> dict:
     # EP_V1_291025_NDVI.tif
     stem = Path(filename).stem
