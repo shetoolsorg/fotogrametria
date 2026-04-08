@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Query
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, Query, Response
 from fastapi.responses import JSONResponse
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -7,6 +7,7 @@ import tempfile
 from datetime import datetime, timezone
 import os
 import shutil
+import json
 from app import raster_stats
 from typing import List, Dict, Any, Optional
 from dotenv import load_dotenv
@@ -355,14 +356,20 @@ async def get_lots_labels(
                 "p90": doc.get("p90"),
                 "min": doc.get("min"),
                 "max": doc.get("max"),
-                "date": doc.get("date"),
+                "date": doc.get("date").isoformat() if doc.get("date") else None,
             }
         })
 
-    return {
-        "type": "FeatureCollection",
-        "features": features
-    }
+    return Response(
+        content=json.dumps({
+            "type": "FeatureCollection",
+            "features": features
+        }),
+        media_type="application/json",
+        headers={
+            "Cache-Control": "public, max-age=3600"
+        }
+    )
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
