@@ -255,6 +255,7 @@ async def calculate_stats(
                 })
 
                 if existing:
+                    print("existing _id:", existing.get("_id"))
                     skipped_count += 1
                     continue
 
