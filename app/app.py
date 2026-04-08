@@ -246,7 +246,7 @@ async def calculate_stats(
             for doc in documents:
                 plot_value = str(doc["metadata"].get(plot_id_field))
 
-                existing = get_database().metric.find_one({
+                existing = await get_database().metric.find_one({
                     "date": doc["date"],
                     f"metadata.{plot_id_field}": plot_value,
                     "metadata.metric": doc["metadata"]["metric"],
@@ -259,7 +259,7 @@ async def calculate_stats(
                     skipped_count += 1
                     continue
 
-                get_database().metric.insert_one(doc)
+                await get_database().metric.insert_one(doc)
                 inserted_count += 1
 
             return {
