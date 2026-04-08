@@ -272,7 +272,97 @@ async def calculate_stats(
 
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
+from shapely.geometry import shape, mapping
 
+
+def build_lot_label(metadata: Dict[str, Any]) -> str:
+    parts = [metadata.get("um_1"), metadata.get("um_2"), metadata.get("um_3")]
+    label = " ".join([p for p in parts if p])
+    return label or metadata.get("Mudada") or metadata.get("uid") or "Lote"
+
+
+def build_label_point_from_geometry(geometry: Dict[str, Any]) -> Dict[str, Any]:
+    geometry_wgs84 = transform_geometry_to_wgs84(geometry)
+    shp = shape(geometry_wgs84)
+    point = shp.point_on_surface()
+    return mapping(point)
+
+
+@app.get("/api/lots_labels")
+async def get_lots_labels(
+    source_tif: Optional[str] = Query(default=None)
+):
+    mongo_filter: Dict[str, Any] = {
+        "metadata.geometry": {"$exists": True},
+        "metadata.uid": {"$exists": True, "$ne": None},
+    }
+
+    if source_tif:
+        mongo_filter["metadata.source_tif"] = source_tif
+
+    pipeline: List[Dict[str, Any]] = [
+        {"$match": mongo_filter},
+        {"$sort": {"date": -1}},
+        {
+            "$group": {
+                "_id": "$metadata.uid",
+                "doc": {"$first": "$$ROOT"}
+            }
+        },
+        {"$replaceRoot": {"newRoot": "$doc"}}
+    ]
+
+    docs = await get_database().metric.aggregate(pipeline).to_list(length=None)
+
+    features = []
+
+    for doc in docs:
+        metadata = doc.get("metadata", {})
+        raw_geometry = metadata.get("geometry")
+
+        if not raw_geometry:
+            continue
+
+        try:
+            label_point = build_label_point_from_geometry(raw_geometry)
+        except Exception as e:
+            print(f"Error building label point for uid {metadata.get('uid')}: {e}")
+            continue
+
+        features.append({
+            "type": "Feature",
+            "geometry": label_point,
+            "properties": {
+                "uid": metadata.get("uid"),
+                "name": metadata.get("Mudada") or metadata.get("uid"),
+                "label": build_lot_label(metadata),
+                "Mudada": metadata.get("Mudada"),
+                "C_Mudada": metadata.get("C_Mudada"),
+                "um_1": metadata.get("um_1"),
+                "um_2": metadata.get("um_2"),
+                "um_3": metadata.get("um_3"),
+                "up": metadata.get("up"),
+                "variedad": metadata.get("variedad"),
+                "especie": metadata.get("especie"),
+                "area_ha": metadata.get("area_ha"),
+                "source_tif": metadata.get("source_tif"),
+                "flight_id": metadata.get("flight_id"),
+                "flight_code": metadata.get("flight_code"),
+                "metric": metadata.get("metric"),
+                "avg": doc.get("avg"),
+                "p10": doc.get("p10"),
+                "p50": doc.get("p50"),
+                "p90": doc.get("p90"),
+                "min": doc.get("min"),
+                "max": doc.get("max"),
+                "date": doc.get("date"),
+            }
+        })
+
+    return {
+        "type": "FeatureCollection",
+        "features": features
+    }
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
