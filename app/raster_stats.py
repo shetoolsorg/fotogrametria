@@ -10,6 +10,17 @@ import rasterio
 from rasterio.features import geometry_mask
 from shapely.geometry import box
 
+def build_histogram(values, bins=10, hist_range=(0, 1)):
+    hist, bin_edges = np.histogram(values, bins=bins, range=hist_range)
+
+    return [
+        {
+            "bin_start": float(bin_edges[i]),
+            "bin_end": float(bin_edges[i + 1]),
+            "count": int(hist[i]),
+        }
+        for i in range(len(hist))
+    ]
 
 def make_json_safe(value: Any) -> Any:
     if value is None:
@@ -151,6 +162,7 @@ def calculate_polygon_stats(
                 valid_mask = mask & (~nodata_mask)
                 values = raster_data[valid_mask]
                 values = values[~np.isnan(values)]
+                histogram = build_histogram(valid_data, bins=10, hist_range=(0, 1))
 
                 if values.size == 0:
                     if include_no_coverage:
