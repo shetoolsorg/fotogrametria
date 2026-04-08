@@ -162,7 +162,7 @@ def calculate_polygon_stats(
                 valid_mask = mask & (~nodata_mask)
                 values = raster_data[valid_mask]
                 values = values[~np.isnan(values)]
-                histogram = build_histogram(valid_data, bins=10, hist_range=(0, 1))
+                
 
                 if values.size == 0:
                     if include_no_coverage:
@@ -180,7 +180,8 @@ def calculate_polygon_stats(
                             "status": "empty_intersection",
                         })
                     continue
-
+                
+                histogram = build_histogram(values, bins=10, hist_range=(0, 1))
                 doc: Dict[str, Any] = {
                     "date": date,
                     "metadata": metadata,
@@ -195,7 +196,7 @@ def calculate_polygon_stats(
                     doc["p10"] = float(np.percentile(values, 10))
                     doc["p50"] = float(np.percentile(values, 50))
                     doc["p90"] = float(np.percentile(values, 90))
-
+                    doc["histogram"] = histogram
                 documents.append(doc)
 
             except Exception as e:
