@@ -83,22 +83,29 @@ app.add_middleware(
     allow_headers=["*"],
 )
 def parse_tif_filename(filename: str) -> dict:
-    # EP_V1_291025_NDVI.tif
+    # {organizacion}-{unidad_produccion}-{fecha:aammdd}-{gsd}-{indice}.tif
+    # Example: RHN-El_Venado-260116-10-NDVI.tif
     stem = Path(filename).stem
-    parts = stem.rsplit("_", 3)
+    parts = stem.split("-", 4)
 
-    if len(parts) != 4:
+    if len(parts) != 5:
         raise ValueError(
-            "Invalid tif filename format. Expected UP_V#_291025_NDVI.tif"
+            "Invalid tif filename format. Expected {organizacion}-{unidad_produccion}-{aammdd}-{gsd}-{indice}.tif"
         )
 
-    local_id, flight_code, raw_date, metric = parts
-    parsed_date = datetime.strptime(raw_date, "%d%m%y").replace(tzinfo=timezone.utc)
+    organizacion, unidad_produccion, raw_date, raw_gsd, metric = parts
+    parsed_date = datetime.strptime(raw_date, "%y%m%d").replace(tzinfo=timezone.utc)
+
+    try:
+        gsd = float(raw_gsd)
+    except ValueError:
+        raise ValueError(f"Invalid GSD value '{raw_gsd}': must be a number in meters")
 
     return {
-        "local_id": local_id,
-        "flight_code": flight_code,
+        "organizacion": organizacion,
+        "unidad_produccion": unidad_produccion,
         "date": parsed_date,
+        "gsd": gsd,
         "metric": metric.lower(),
     }
 
@@ -184,9 +191,9 @@ async def calculate_stats(
         tif_info = parse_tif_filename(tif_file.filename)
         parsed_date = tif_info["date"]
         metric = tif_info["metric"]
-        local_id = tif_info["local_id"]
-        flight_code = tif_info["flight_code"]
-        flight_id = f"{local_id}_{flight_code}_{parsed_date.strftime('%Y-%m-%d')}"
+        organizacion = tif_info["organizacion"]
+        unidad_produccion = tif_info["unidad_produccion"]
+        gsd = tif_info["gsd"]
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -208,9 +215,9 @@ async def calculate_stats(
             layer_name = layers.iloc[0]["name"]
 
             base_metadata = {
-                "local_id": local_id,
-                "flight_code": flight_code,
-                "flight_id": flight_id,
+                "organizacion": organizacion,
+                "unidad_produccion": unidad_produccion,
+                "gsd": gsd,
                 "metric": metric,
                 "plot_id_field": plot_id_field,
                 "source_tif": tif_file.filename,
@@ -250,8 +257,8 @@ async def calculate_stats(
                     "date": doc["date"],
                     f"metadata.{plot_id_field}": plot_value,
                     "metadata.metric": doc["metadata"]["metric"],
-                    "metadata.flight_code": doc["metadata"]["flight_code"],
-                    "metadata.local_id": doc["metadata"]["local_id"],
+                    "metadata.organizacion": doc["metadata"]["organizacion"],
+                    "metadata.unidad_produccion": doc["metadata"]["unidad_produccion"],
                 })
 
                 if existing:
@@ -264,7 +271,6 @@ async def calculate_stats(
 
             return {
                 "message": "Statistics processed successfully.",
-                "flight_id": flight_id,
                 "plot_id_field": plot_id_field,
                 "generated_count": len(documents),
                 "inserted_count": inserted_count,
@@ -348,8 +354,9 @@ async def get_lots_labels(
                 "especie": metadata.get("especie"),
                 "area_ha": metadata.get("area_ha"),
                 "source_tif": metadata.get("source_tif"),
-                "flight_id": metadata.get("flight_id"),
-                "flight_code": metadata.get("flight_code"),
+                "organizacion": metadata.get("organizacion"),
+                "unidad_produccion": metadata.get("unidad_produccion"),
+                "gsd": metadata.get("gsd"),
                 "metric": metadata.get("metric"),
                 "avg": doc.get("avg"),
                 "p10": doc.get("p10"),
