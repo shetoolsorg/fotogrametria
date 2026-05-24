@@ -81,12 +81,13 @@ services:
         condition: service_healthy
     environment:
       MONGODB_URL: mongodb://mongo:27017
-      MONGODB_DB: metrics
+      MONGODB_DB: fotogrametria
       API_KEY: 949ff184aedcde3a42399ed2c537ec2f3af3f34
       DATA_ROOT: /data
       TITILER_BASE_URL: http://titiler
     volumes:
       - "${DATA_PATH:-/opt/asalaises}:/data"
+      - "${DATA_PATH:-/opt/asalaises}/titiler/data/cogs:/app/cogs"
     ports:
       - "${ANALYSIS_API_PORT:-8015}:8000"
     command: >
